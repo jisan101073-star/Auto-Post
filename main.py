@@ -7,7 +7,7 @@ import time
 import telebot
 
 
-# --- RENDER PORT BINDING FIX (DUMMY SERVER) ---
+# --- RENDER PORT BINDING FIX ---
 class HealthCheckHandler(http.server.BaseHTTPRequestHandler):
 
     def do_GET(self):
@@ -17,7 +17,7 @@ class HealthCheckHandler(http.server.BaseHTTPRequestHandler):
         self.wfile.write(b"Jisan Bot is Alive!")
 
     def log_message(self, format, *args):
-        return  # Render Log পরিষ্কার রাখার জন্য HTTP লগ বন্ধ রাখা হলো
+        return
 
 
 def run_web_server():
@@ -29,7 +29,6 @@ def run_web_server():
         print(f"Web server error: {e}")
 
 
-# Web Server Thread চালু করা (Render Port Detection এর জন্য)
 threading.Thread(target=run_web_server, daemon=True).start()
 
 
@@ -42,7 +41,7 @@ if not BOT_TOKEN:
 
 bot = telebot.TeleBot(BOT_TOKEN)
 
-# SQLite Database Setup (Thread Safe)
+# SQLite Database Setup
 db_lock = threading.Lock()
 conn = sqlite3.connect("jisan_bot.db", check_same_thread=False)
 cursor = conn.cursor()
@@ -116,25 +115,25 @@ def send_welcome(message):
         "🏴‍☠️ Welcome to Jisan Bot! 🩸\n\n"
         "👑 *The official Auto Post automation bot by Jisan Brand.*\n\n"
         "⚡ Available Commands:\n"
-        "• /addcaption <text> – নতুন ক্যাপশন সিরিয়ালে যোগ করুন\n"
-        "• /mycaptions – আপনার সেভ করা ক্যাপশন ও ID দেখুন\n"
-        "• /editcaption <id> <text> – নির্দিষ্ট ক্যাপশন এডিট করুন\n"
-        "• /deletecaption <id> – নির্দিষ্ট ক্যাপশন ডিলিট করুন\n"
-        "• /settarget <chat_id/@username> – চ্যানেল/গ্রুপ সেট করুন\n"
-        "• /settime <minutes> – কত মিনিট পর পর পোস্ট হবে সেট করুন\n"
-        "• /startpost – অটো পোস্ট চালু করুন\n"
-        "• /stoppost – অটো পোস্ট বন্ধ করুন\n"
+        "• `/addcaption <text>` – নতুন ক্যাপশন সিরিয়ালে যোগ করুন\n"
+        "• `/mycaptions` – আপনার সেভ করা ক্যাপশন ও ID দেখুন\n"
+        "• `/editcaption <id> <text>` – নির্দিষ্ট ক্যাপশন এডিট করুন\n"
+        "• `/deletecaption <id>` – নির্দিষ্ট ক্যাপশন ডিলিট করুন\n"
+        "• `/settarget <chat_id>` – চ্যানেল/গ্রুপ সেট করুন\n"
+        "• `/settime <minutes>` – কত মিনিট পর পর পোস্ট হবে সেট করুন\n"
+        "• `/startpost` – অটো পোস্ট চালু করুন\n"
+        "• `/stoppost` – অটো পোস্ট বন্ধ করুন\n"
     )
 
     if user_id == ADMIN_ID:
         text += (
-            "• /stats – মোট কতজন বট ইউজ করছে দেখুন 🔒 (Admin Only)\n"
-            "• /broadcast <msg> – বটের সব ইউজারকে মেসেজ পাঠান 🔒 (Admin Only)\n"
+            "• `/stats` – মোট কতজন বট ইউজ করছে দেখুন 🔒 (Admin Only)\n"
+            "• `/broadcast <msg>` – বটের সব ইউজারকে মেসেজ পাঠান 🔒 (Admin Only)\n"
         )
 
     text += (
-        "• /help – ব্যবহারের নিয়ম দেখুন\n\n"
-        "🎯 Send /addcaption first to set your auto post sequence!"
+        "• `/help` – ব্যবহারের নিয়ম দেখুন\n\n"
+        "🎯 Send `/addcaption` first to set your auto post sequence!"
     )
     bot.reply_to(message, text, parse_mode="Markdown")
 
@@ -178,7 +177,7 @@ def list_captions(message):
 
     msg = "📋 *আপনার সেভ করা ক্যাপশনসমূহ (Serial):*\n\n"
     for idx, row in enumerate(rows, start=1):
-        msg += f"*{idx}. [ID: {row[0]}]* {row[1][:40]}...\n"
+        msg += f"• *{idx}.* (ID: `{row[0]}`): {row[1][:40]}\n"
 
     msg += "\nএডিট করতে: `/editcaption <ID> <New Text>`\nডিলিট করতে: `/deletecaption <ID>`"
     bot.reply_to(message, msg, parse_mode="Markdown")
@@ -362,7 +361,7 @@ def admin_broadcast(message):
 def auto_poster_loop():
     while True:
         try:
-            time.sleep(15)  # প্রতি ১৫ সেকেন্ড পর পর চেক করবে
+            time.sleep(15)
             current_time = time.time()
 
             with db_lock:
@@ -374,7 +373,6 @@ def auto_poster_loop():
             for user in active_posters:
                 u_id, target, interval, curr_idx, last_time = user
 
-                # সময় চেক করা
                 if current_time - last_time >= (interval * 60):
                     with db_lock:
                         cursor.execute(
@@ -384,7 +382,6 @@ def auto_poster_loop():
                         caps = cursor.fetchall()
 
                     if caps:
-                        # ক্যাপশন সিরিয়াল অনুযায়ী পোস্টিং
                         next_idx = curr_idx % len(caps)
                         post_text = caps[next_idx][0]
 
@@ -402,10 +399,7 @@ def auto_poster_loop():
             print(f"Loop error: {err}")
 
 
-# Start Background Thread for Auto Post Engine
 threading.Thread(target=auto_poster_loop, daemon=True).start()
 
-# Start Telegram Bot Polling
 print("Jisan Bot is Running...")
 bot.infinity_polling(skip_pending=True)
-    
