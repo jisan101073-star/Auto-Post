@@ -1,10 +1,39 @@
+import http.server
 import os
+import socketserver
 import sqlite3
 import threading
 import time
 import telebot
 
-# Environment Variables from Render
+
+# --- RENDER PORT BINDING FIX (DUMMY SERVER) ---
+class HealthCheckHandler(http.server.BaseHTTPRequestHandler):
+
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-type", "text/plain")
+        self.end_headers()
+        self.wfile.write(b"Jisan Bot is Alive!")
+
+    def log_message(self, format, *args):
+        return  # Render Log পরিষ্কার রাখার জন্য HTTP লগ বন্ধ রাখা হলো
+
+
+def run_web_server():
+    port = int(os.getenv("PORT", 8080))
+    try:
+        with socketserver.TCPServer(("", port), HealthCheckHandler) as httpd:
+            httpd.serve_forever()
+    except Exception as e:
+        print(f"Web server error: {e}")
+
+
+# Web Server Thread চালু করা (Render Port Detection এর জন্য)
+threading.Thread(target=run_web_server, daemon=True).start()
+
+
+# --- TELEGRAM BOT & DATABASE SETUP ---
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 
@@ -333,7 +362,7 @@ def admin_broadcast(message):
 def auto_poster_loop():
     while True:
         try:
-            time.sleep(15)  # Check every 15 seconds
+            time.sleep(15)  # প্রতি ১৫ সেকেন্ড পর পর চেক করবে
             current_time = time.time()
 
             with db_lock:
@@ -345,7 +374,7 @@ def auto_poster_loop():
             for user in active_posters:
                 u_id, target, interval, curr_idx, last_time = user
 
-                # Check time limit
+                # সময় চেক করা
                 if current_time - last_time >= (interval * 60):
                     with db_lock:
                         cursor.execute(
@@ -355,7 +384,7 @@ def auto_poster_loop():
                         caps = cursor.fetchall()
 
                     if caps:
-                        # Serial index loop handling
+                        # ক্যাপশন সিরিয়াল অনুযায়ী পোস্টিং
                         next_idx = curr_idx % len(caps)
                         post_text = caps[next_idx][0]
 
@@ -379,3 +408,4 @@ threading.Thread(target=auto_poster_loop, daemon=True).start()
 # Start Telegram Bot Polling
 print("Jisan Bot is Running...")
 bot.infinity_polling(skip_pending=True)
+    
