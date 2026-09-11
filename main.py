@@ -5,6 +5,7 @@ import sqlite3
 import threading
 import time
 import telebot
+from telebot.apihelper import ApiTelegramException
 
 
 # --- RENDER PORT BINDING FIX ---
@@ -106,35 +107,32 @@ def update_user(user_id, **kwargs):
 # --- COMMAND HANDLERS ---
 
 
-@bot.message_handler(commands=["start"])
+@bot.message_handler(commands=["start", "help"])
 def send_welcome(message):
     user_id = message.from_user.id
     get_user(user_id)
 
     text = (
-        "🏴‍☠️ Welcome to Jisan Bot! 🩸\n\n"
+        "🏴‍☠️ *Welcome to Jisan Bot!* 🩸\n\n"
         "👑 *The official Auto Post automation bot by Jisan Brand.*\n\n"
-        "⚡ Available Commands:\n"
-        "• `/addcaption <text>` – নতুন ক্যাপশন সিরিয়ালে যোগ করুন\n"
-        "• `/mycaptions` – আপনার সেভ করা ক্যাপশন ও ID দেখুন\n"
-        "• `/editcaption <id> <text>` – নির্দিষ্ট ক্যাপশন এডিট করুন\n"
-        "• `/deletecaption <id>` – নির্দিষ্ট ক্যাপশন ডিলিট করুন\n"
-        "• `/settarget <chat_id>` – চ্যানেল/গ্রুপ সেট করুন\n"
-        "• `/settime <minutes>` – কত মিনিট পর পর পোস্ট হবে সেট করুন\n"
+        "⚡ *Available Commands:*\n"
+        "• `/addcaption <text>` – নতুন ক্যাপশন যোগ করুন\n"
+        "• `/mycaptions` – সেভ করা ক্যাপশন দেখুন\n"
+        "• `/editcaption <id> <text>` – ক্যাপশন এডিট করুন\n"
+        "• `/deletecaption <id>` – ক্যাপশন ডিলিট করুন\n"
+        "• `/settarget @channel` – চ্যানেল/গ্রুপ সেট করুন\n"
+        "• `/settime <minutes>` – টাইম সেট করুন (মিনিটে)\n"
         "• `/startpost` – অটো পোস্ট চালু করুন\n"
         "• `/stoppost` – অটো পোস্ট বন্ধ করুন\n"
     )
 
     if user_id == ADMIN_ID:
         text += (
-            "• `/stats` – মোট কতজন বট ইউজ করছে দেখুন 🔒 (Admin Only)\n"
-            "• `/broadcast <msg>` – বটের সব ইউজারকে মেসেজ পাঠান 🔒 (Admin Only)\n"
+            "• `/stats` – বট স্ট্যাটাস দেখুন (Admin)\n"
+            "• `/broadcast <msg>` – সবাইকে মেসেজ পাঠান (Admin)\n"
         )
 
-    text += (
-        "• `/help` – ব্যবহারের নিয়ম দেখুন\n\n"
-        "🎯 Send `/addcaption` first to set your auto post sequence!"
-    )
+    text += "\n🎯 Send `/addcaption` first to set your auto post sequence!"
     bot.reply_to(message, text, parse_mode="Markdown")
 
 
@@ -146,7 +144,7 @@ def add_caption(message):
     if not caption_text:
         bot.reply_to(
             message,
-            "❌ ব্যবহার পদ্ধতি: `/addcaption আপনার ক্যাপশনটি এখানে লিখুন`",
+            "❌ ব্যবহার পদ্ধতি: `/addcaption আপনার ক্যাপশন লিখুন`",
             parse_mode="Markdown",
         )
         return
@@ -175,11 +173,15 @@ def list_captions(message):
         bot.reply_to(message, "⚠️ আপনার কোনো সেভ করা ক্যাপশন নেই।")
         return
 
-    msg = "📋 *আপনার সেভ করা ক্যাপশনসমূহ (Serial):*\n\n"
+    msg = "📋 *আপনার সেভ করা ক্যাপশনসমূহ:*\n\n"
     for idx, row in enumerate(rows, start=1):
-        msg += f"• *{idx}.* (ID: `{row[0]}`): {row[1][:40]}\n"
+        clean_cap = row[1].replace("*", "").replace("_", "")[:40]
+        msg += f"• *{idx}.* (ID: `{row[0]}`): {clean_cap}\n"
 
-    msg += "\nএডিট করতে: `/editcaption <ID> <New Text>`\nডিলিট করতে: `/deletecaption <ID>`"
+    msg += (
+        "\nএডিট করতে: `/editcaption <ID> <New Text>`\nডিলিট করতে:"
+        " `/deletecaption <ID>`"
+    )
     bot.reply_to(message, msg, parse_mode="Markdown")
 
 
@@ -254,7 +256,8 @@ def set_target(message):
     update_user(user_id, target_chat=target)
     bot.reply_to(
         message,
-        f"🎯 টার্গেট চ্যানেল/গ্রুপ সেট করা হয়েছে: `{target}`\n\n*(মনে রাখবেন, বটকে ওই চ্যানেল/গ্রুপে Admin বানাতে হবে)*",
+        f"🎯 টার্গেট সেট করা হয়েছে: `{target}`\n\n*(মনে রাখবেন, বটকে ওই"
+        " চ্যানেল/গ্রুপে Admin বানাতে হবে)*",
         parse_mode="Markdown",
     )
 
@@ -267,7 +270,7 @@ def set_time(message):
     if len(args) < 2 or not args[1].isdigit():
         bot.reply_to(
             message,
-            "❌ ব্যবহার পদ্ধতি: `/settime <minutes>` (যেমন: `/settime 60` ১ ঘণ্টার জন্য)",
+            "❌ ব্যবহার পদ্ধতি: `/settime <minutes>` (যেমন: `/settime 60`)",
             parse_mode="Markdown",
         )
         return
@@ -287,7 +290,7 @@ def start_post(message):
     if not u["target_chat"]:
         bot.reply_to(
             message,
-            "❌ আগে চ্যানেল/গ্রুপ সেট করুন। کمان্ড: `/settarget @yourchannel`",
+            "❌ আগে চ্যানেল সেট করুন। যেমন: `/settarget @yourchannel`",
             parse_mode="Markdown",
         )
         return
@@ -295,7 +298,7 @@ def start_post(message):
     update_user(user_id, is_active=1, last_post_time=0)
     bot.reply_to(
         message,
-        "🚀 অটো পোস্ট চালু করা হয়েছে! সময় অনুযায়ী ক্যাপশন সিরিয়াল অনুযায়ী পোস্ট হবে।",
+        "🚀 অটো পোস্ট চালু করা হয়েছে! সময় অনুযায়ী পোস্ট হওয়া শুরু হবে।",
     )
 
 
@@ -303,7 +306,7 @@ def start_post(message):
 def stop_post(message):
     user_id = message.from_user.id
     update_user(user_id, is_active=0)
-    bot.reply_to(message, "🛑 অটো পোস্ট সাময়িকভাবে বন্ধ করা হয়েছে।")
+    bot.reply_to(message, "🛑 অটো পোস্ট বন্ধ করা হয়েছে।")
 
 
 # --- ADMIN ONLY COMMANDS ---
@@ -323,7 +326,7 @@ def admin_stats(message):
 
     bot.reply_to(
         message,
-        f"📊 *Jisan Bot Admin Analytics*\n\n"
+        f"📊 *Admin Analytics*\n\n"
         f"👤 *Total Users:* `{total_users}`\n"
         f"⚡ *Active Auto Posters:* `{active_users}`",
         parse_mode="Markdown",
@@ -337,7 +340,7 @@ def admin_broadcast(message):
 
     broadcast_msg = message.text.replace("/broadcast", "").strip()
     if not broadcast_msg:
-        bot.reply_to(message, "❌ মেসেজ লিখুন: `/broadcast আপনার মেসেজ`")
+        bot.reply_to(message, "❌ ব্যবহার: `/broadcast আপনার মেসেজ`")
         return
 
     with db_lock:
@@ -366,7 +369,8 @@ def auto_poster_loop():
 
             with db_lock:
                 cursor.execute(
-                    "SELECT user_id, target_chat, interval_min, current_index, last_post_time FROM users WHERE is_active = 1"
+                    "SELECT user_id, target_chat, interval_min, current_index,"
+                    " last_post_time FROM users WHERE is_active = 1"
                 )
                 active_posters = cursor.fetchall()
 
@@ -376,7 +380,8 @@ def auto_poster_loop():
                 if current_time - last_time >= (interval * 60):
                     with db_lock:
                         cursor.execute(
-                            "SELECT caption_text FROM captions WHERE user_id = ? ORDER BY id ASC",
+                            "SELECT caption_text FROM captions WHERE user_id ="
+                            " ? ORDER BY id ASC",
                             (u_id,),
                         )
                         caps = cursor.fetchall()
@@ -401,5 +406,25 @@ def auto_poster_loop():
 
 threading.Thread(target=auto_poster_loop, daemon=True).start()
 
-print("Jisan Bot is Running...")
-bot.infinity_polling(skip_pending=True)
+# --- BOT STARTUP WITH CONFLICT 409 AUTO RECOVERY ---
+try:
+    bot.remove_webhook()
+except Exception as e:
+    print(f"Webhook note: {e}")
+
+print("Jisan Bot is Starting...")
+
+while True:
+    try:
+        bot.infinity_polling(skip_pending=True, timeout=20)
+    except ApiTelegramException as e:
+        if e.error_code == 409:
+            print("⚠️ Conflict 409! Waiting 10 seconds for old instance to close...")
+            time.sleep(10)
+        else:
+            print(f"Telegram API Exception: {e}")
+            time.sleep(5)
+    except Exception as e:
+        print(f"Polling Exception: {e}")
+        time.sleep(5)
+    
