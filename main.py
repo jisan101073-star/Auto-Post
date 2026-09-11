@@ -119,7 +119,52 @@ def update_user(user_id, **kwargs):
         conn.commit()
 
 
-# --- AUTOMATIC CHANNEL DETECTOR ---
+# --- AUTOMATIC CHANNEL DETECTOR VIA FORWARDED MESSAGES ---
+@bot.message_handler(
+    func=lambda msg: msg.forward_from_chat is not None
+    and msg.forward_from_chat.type == "channel"
+)
+def handle_channel_forward(message):
+    user_id = message.from_user.id
+    channel = message.forward_from_chat
+    chat_id = str(channel.id)
+    title = channel.title or "Channel"
+
+    try:
+        bot_user = bot.get_me()
+        member = bot.get_chat_member(chat_id, bot_user.id)
+
+        if member.status in ["administrator", "creator"]:
+            with db_lock:
+                cursor.execute(
+                    "INSERT OR REPLACE INTO channels (chat_id, title, added_by)"
+                    " VALUES (?, ?, ?)",
+                    (chat_id, title, user_id),
+                )
+                conn.commit()
+
+            update_user(user_id, target_chat=chat_id)
+            bot.reply_to(
+                message,
+                f"✅ চ্যানেল সফলভাবে সনাক্ত এবং সেট করা হয়েছে!\n\n📌 Target"
+                f" Channel: {title}\n🆔 ID: {chat_id}\n\nএখন থেকে আপনার অটো পোস্ট"
+                " এই চ্যানেলে যাবে।",
+            )
+        else:
+            bot.reply_to(
+                message,
+                f"⚠️ চ্যানেল পাওয়া গেছে ({title}), কিন্তু বটকে ওই চ্যানেলে Admin"
+                " বানানো হয়নি!\n\nঅনুগ্রহ করে বটকে Admin বানিয়ে আবার মেসেজ"
+                " ফরওয়ার্ড করুন।",
+            )
+    except Exception as e:
+        bot.reply_to(
+            message,
+            "❌ চ্যানেল ভেরিফাই করা যায়নি। বটকে ওই চ্যানেলে Admin বানিয়ে আবার চেষ্টা"
+            " করুন।",
+        )
+
+
 @bot.my_chat_member_handler()
 def handle_chat_member_update(event):
     chat_id = str(event.chat.id)
@@ -155,16 +200,17 @@ def send_welcome(message):
         "⚡ Available Commands:\n"
         "• /addcaption <text> – নতুন ক্যাপশন যোগ করুন\n"
         "• /mycaptions – ক্যাপশন ম্যানেজ বা ডিলিট/এডিট করুন\n"
-        "• /settarget – চ্যানেল সিলেক্ট বা পরিবর্তন করুন\n"
+        "• /settarget – চ্যানেল সিলেক্ট বা সেট করুন\n"
         "• /settime <minutes> – টাইম সেট করুন (মিনিটে)\n"
         "• /startpost – অটো পোস্ট চালু করুন\n"
-        "• /stoppost – অটো পোস্ট বন্ধ করুন\n"
+        "• /stoppost – অটো পোস্ট বন্ধ করুন\n\n"
+        "💡 টিপস: আপনার চ্যানেল থেকে যেকোনো ১টি মেসেজ এই বটের ইনবক্সে ফরওয়ার্ড করলেও চ্যানেল অটো সেভ হয়ে যাবে!"
     )
 
     if user_id == ADMIN_ID:
         text += (
-            "• /stats – বট স্ট্যাটাস দেখুন (Admin)\n"
-            "• /broadcast <msg> – সবাইকে মেসেজ পাঠান (Admin)\n"
+            "\n\n• /stats – বট স্ট্যাটাস দেখুন (Admin)\n• /broadcast <msg> –"
+            " সবাইকে মেসেজ পাঠান (Admin)"
         )
 
     bot.reply_to(message, text)
@@ -191,7 +237,7 @@ def add_caption(message):
     )
 
 
-# --- INTERACTIVE CAPTION MANAGER (SHOW, EDIT, DELETE) ---
+# --- INTERACTIVE CAPTION MANAGER ---
 def show_caption_manager(chat_id, user_id, message_id=None):
     with db_lock:
         cursor.execute(
@@ -316,39 +362,80 @@ def process_new_caption_step(message, cap_id, user_id):
     show_caption_manager(message.chat.id, user_id)
 
 
-# --- INTERACTIVE CHANNEL SELECTOR ---
+# --- TARGET SETTER & CHANNEL SELECTOR ---
 @bot.message_handler(commands=["settarget", "channels"])
 def set_target(message):
     user_id = message.from_user.id
+    args = (
+        message.text.replace("/settarget", "")
+        .replace("/channels", "")
+        .strip()
+    )
+
+    if args:
+        target = args
+        try:
+            chat_info = bot.get_chat(target)
+            chat_id = str(chat_info.id)
+            title = chat_info.title or target
+            bot_user = bot.get_me()
+            member = bot.get_chat_member(chat_id, bot_user.id)
+
+            if member.status in ["administrator", "creator"]:
+                with db_lock:
+                    cursor.execute(
+                        "INSERT OR REPLACE INTO channels (chat_id, title,"
+                        " added_by) VALUES (?, ?, ?)",
+                        (chat_id, title, user_id),
+                    )
+                    conn.commit()
+                update_user(user_id, target_chat=chat_id)
+                bot.reply_to(
+                    message,
+                    f"✅ চ্যানেল সফলভাবে সেট হয়েছে!\n\n📌 Target Channel:"
+                    f" {title}\n🆔 ID: {chat_id}",
+                )
+            else:
+                bot.reply_to(
+                    message,
+                    f"⚠️ বটকে {target} চ্যানেলে Admin করা হয়নি! আগে Admin বানিয়ে"
+                    " আবার চেষ্টা করুন।",
+                )
+        except Exception:
+            update_user(user_id, target_chat=target)
+            bot.reply_to(
+                message,
+                f"🎯 টার্গেট সেট করা হয়েছে: {target}\n(মনে রাখবেন, বটকে ওই"
+                " চ্যানেলে Admin থাকতে হবে)",
+            )
+        return
 
     with db_lock:
         cursor.execute("SELECT chat_id, title FROM channels")
         rows = cursor.fetchall()
 
-    if not rows:
-        bot.reply_to(
-            message,
-            "⚠️ কোনো চ্যানেল খুঁজে পাওয়া যায়নি!\n\n"
-            "👉 প্রথমে বটকে আপনার চ্যানেল বা গ্রুপে Admin হিসেবে যুক্ত করুন।\n"
-            "তারপর আবার /settarget কমান্ড দিন।",
-        )
-        return
-
     markup = telebot.types.InlineKeyboardMarkup()
-    for chat_id, title in rows:
-        markup.add(
-            telebot.types.InlineKeyboardButton(
-                text=f"📢 {title}",
-                callback_data=f"select_chat:{chat_id}:{title[:15]}",
+    if rows:
+        for chat_id, title in rows:
+            markup.add(
+                telebot.types.InlineKeyboardButton(
+                    text=f"📢 {title}",
+                    callback_data=f"select_chat:{chat_id}:{title[:15]}",
+                )
             )
-        )
 
-    bot.reply_to(
-        message,
-        "🎯 আপনার যে সকল চ্যানেলে বট অ্যাড রয়েছে:\n"
-        "নিচের তালিকা থেকে যেটিতে পোস্ট করতে চান সেটিতে ক্লিক করুন:",
-        reply_markup=markup,
+    msg_text = (
+        "🎯 চ্যানেল সেট করার ৩টি সহজ উপায়:\n\n"
+        "১. মেসেজ ফরওয়ার্ড (সেরা): আপনার চ্যানেল থেকে যেকোনো ১টি পোস্ট এই বটের ইনবক্সে Forward করুন।\n"
+        "২. ইউজারনেম দিয়ে: /settarget @YourChannelUsername লিখুন।\n"
     )
+
+    if rows:
+        msg_text += "৩. অথবা নিচের বাটন থেকে সিলেক্ট করুন:"
+        bot.reply_to(message, msg_text, reply_markup=markup)
+    else:
+        msg_text += "\n👉 আপনার চ্যানেল থেকে ১টি পোস্ট ফরওয়ার্ড করে দিন, সাথে সাথে সেট হয়ে যাবে!"
+        bot.reply_to(message, msg_text)
 
 
 @bot.callback_query_handler(
@@ -403,14 +490,15 @@ def start_post(message):
         bot.reply_to(
             message,
             "❌ আপনি এখনও কোনো চ্যানেল সিলেক্ট করেননি!\n"
-            "আগে /settarget দিয়ে চ্যানেল সিলেক্ট করুন।",
+            "আপনার চ্যানেল থেকে ১টি পোস্ট এখানে ফরওয়ার্ড করুন অথবা /settarget"
+            " @channel লিখুন।",
         )
         return
 
     update_user(user_id, is_active=1, last_post_time=0)
     bot.reply_to(
         message,
-        "🚀 অটো পোস্ট চালু করা হয়েছে! সময় অনুযায়ী পোস্ট হওয়া শুরু হবে।",
+        "🚀 অটো পোস্ট চালু করা হয়েছে! সময় অনুযায়ী পোস্ট হওয়া শুরু হবে।",
     )
 
 
@@ -468,7 +556,7 @@ def admin_broadcast(message):
     bot.reply_to(message, f"📢 মোট {count} জন ইউজারের কাছে মেসেজ পাঠানো হয়েছে!")
 
 
-# --- BACKGROUND AUTO POSTER ENGINE ---
+# --- BACKGROUND AUTO POSTER ENGINE (WITH AUTO-DELETE AFTER POSTING) ---
 
 
 def auto_poster_loop():
@@ -479,36 +567,53 @@ def auto_poster_loop():
 
             with db_lock:
                 cursor.execute(
-                    "SELECT user_id, target_chat, interval_min, current_index,"
-                    " last_post_time FROM users WHERE is_active = 1"
+                    "SELECT user_id, target_chat, interval_min, last_post_time"
+                    " FROM users WHERE is_active = 1"
                 )
                 active_posters = cursor.fetchall()
 
             for user in active_posters:
-                u_id, target, interval, curr_idx, last_time = user
+                u_id, target, interval, last_time = user
 
                 if current_time - last_time >= (interval * 60):
                     with db_lock:
                         cursor.execute(
-                            "SELECT caption_text FROM captions WHERE user_id ="
-                            " ? ORDER BY id ASC",
+                            "SELECT id, caption_text FROM captions WHERE"
+                            " user_id = ? ORDER BY id ASC LIMIT 1",
                             (u_id,),
                         )
-                        caps = cursor.fetchall()
+                        cap = cursor.fetchone()
 
-                    if caps:
-                        next_idx = curr_idx % len(caps)
-                        post_text = caps[next_idx][0]
+                    if cap:
+                        cap_id, post_text = cap
 
                         try:
+                            # 1. Post caption to channel
                             bot.send_message(target, post_text)
-                            update_user(
-                                u_id,
-                                current_index=(next_idx + 1),
-                                last_post_time=current_time,
-                            )
+
+                            # 2. Auto delete caption from Database after successfully posting
+                            with db_lock:
+                                cursor.execute(
+                                    "DELETE FROM captions WHERE id = ?",
+                                    (cap_id,),
+                                )
+                                conn.commit()
+
+                            update_user(u_id, last_post_time=current_time)
+
                         except Exception as e:
                             print(f"Post failed for user {u_id}: {e}")
+                    else:
+                        # No captions left -> Automatically stop posting and notify user
+                        update_user(u_id, is_active=0)
+                        try:
+                            bot.send_message(
+                                u_id,
+                                "⚠️ আপনার সেভ করা সকল ক্যাপশন পোস্ট করা শেষ হয়ে"
+                                " গেছে! অটো-পোস্ট বন্ধ করা হলো।",
+                            )
+                        except Exception:
+                            pass
 
         except Exception as err:
             print(f"Loop error: {err}")
@@ -541,4 +646,4 @@ while True:
     except Exception as e:
         print(f"Polling Exception: {e}")
         time.sleep(5)
-            
+        
