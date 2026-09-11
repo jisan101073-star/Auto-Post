@@ -8,7 +8,7 @@ import telebot
 from telebot.apihelper import ApiTelegramException
 
 
-# --- RENDER PORT BINDING FIX ---
+# --- RENDER PORT BINDING & UPTIMEROBOT FIX ---
 class HealthCheckHandler(http.server.BaseHTTPRequestHandler):
 
     def do_GET(self):
@@ -16,6 +16,11 @@ class HealthCheckHandler(http.server.BaseHTTPRequestHandler):
         self.send_header("Content-type", "text/plain")
         self.end_headers()
         self.wfile.write(b"Jisan Bot is Alive!")
+
+    def do_HEAD(self):
+        self.send_response(200)
+        self.send_header("Content-type", "text/plain")
+        self.end_headers()
 
     def log_message(self, format, *args):
         return
@@ -113,40 +118,36 @@ def send_welcome(message):
     get_user(user_id)
 
     text = (
-        "🏴‍☠️ *Welcome to Jisan Bot!* 🩸\n\n"
-        "👑 *The official Auto Post automation bot by Jisan Brand.*\n\n"
-        "⚡ *Available Commands:*\n"
-        "• `/addcaption <text>` – নতুন ক্যাপশন যোগ করুন\n"
-        "• `/mycaptions` – সেভ করা ক্যাপশন দেখুন\n"
-        "• `/editcaption <id> <text>` – ক্যাপশন এডিট করুন\n"
-        "• `/deletecaption <id>` – ক্যাপশন ডিলিট করুন\n"
-        "• `/settarget @channel` – চ্যানেল/গ্রুপ সেট করুন\n"
-        "• `/settime <minutes>` – টাইম সেট করুন (মিনিটে)\n"
-        "• `/startpost` – অটো পোস্ট চালু করুন\n"
-        "• `/stoppost` – অটো পোস্ট বন্ধ করুন\n"
+        "🏴‍☠️ Welcome to Jisan Bot! 🩸\n\n"
+        "👑 The official Auto Post automation bot by Jisan Brand.\n\n"
+        "⚡ Available Commands:\n"
+        "• /addcaption <text> – নতুন ক্যাপশন যোগ করুন\n"
+        "• /mycaptions – সেভ করা ক্যাপশন দেখুন\n"
+        "• /editcaption <id> <text> – ক্যাপশন এডিট করুন\n"
+        "• /deletecaption <id> – ক্যাপশন ডিলিট করুন\n"
+        "• /settarget @channel – চ্যানেল/গ্রুপ সেট করুন\n"
+        "• /settime <minutes> – টাইম সেট করুন (মিনিটে)\n"
+        "• /startpost – অটো পোস্ট চালু করুন\n"
+        "• /stoppost – অটো পোস্ট বন্ধ করুন\n"
     )
 
     if user_id == ADMIN_ID:
         text += (
-            "• `/stats` – বট স্ট্যাটাস দেখুন (Admin)\n"
-            "• `/broadcast <msg>` – সবাইকে মেসেজ পাঠান (Admin)\n"
+            "• /stats – বট স্ট্যাটাস দেখুন (Admin)\n"
+            "• /broadcast <msg> – সবাইকে মেসেজ পাঠান (Admin)\n"
         )
 
-    text += "\n🎯 Send `/addcaption` first to set your auto post sequence!"
-    bot.reply_to(message, text, parse_mode="Markdown")
+    text += "\n🎯 Send /addcaption first to set your auto post sequence!"
+    bot.reply_to(message, text)
 
 
 @bot.message_handler(commands=["addcaption"])
 def add_caption(message):
     user_id = message.from_user.id
-    caption_text = message.text.replace("/addcaption", "").strip()
+    caption_text = message.text.replace("/addcaption", "", 1).strip()
 
     if not caption_text:
-        bot.reply_to(
-            message,
-            "❌ ব্যবহার পদ্ধতি: `/addcaption আপনার ক্যাপশন লিখুন`",
-            parse_mode="Markdown",
-        )
+        bot.reply_to(message, "❌ ব্যবহার পদ্ধতি: /addcaption আপনার ক্যাপশন লিখুন")
         return
 
     with db_lock:
@@ -173,16 +174,16 @@ def list_captions(message):
         bot.reply_to(message, "⚠️ আপনার কোনো সেভ করা ক্যাপশন নেই।")
         return
 
-    msg = "📋 *আপনার সেভ করা ক্যাপশনসমূহ:*\n\n"
+    msg = "📋 আপনার সেভ করা সম্পূর্ণ ক্যাপশনসমূহ:\n\n"
     for idx, row in enumerate(rows, start=1):
-        clean_cap = row[1].replace("*", "").replace("_", "")[:40]
-        msg += f"• *{idx}.* (ID: `{row[0]}`): {clean_cap}\n"
+        msg += f"--- [ Serial: {idx} | ID: {row[0]} ] ---\n{row[1]}\n\n"
 
     msg += (
-        "\nএডিট করতে: `/editcaption <ID> <New Text>`\nডিলিট করতে:"
-        " `/deletecaption <ID>`"
+        "------------------------------------\n"
+        "এডিট করতে: /editcaption <ID> <New Text>\n"
+        "ডিলিট করতে: /deletecaption <ID>"
     )
-    bot.reply_to(message, msg, parse_mode="Markdown")
+    bot.reply_to(message, msg)
 
 
 @bot.message_handler(commands=["editcaption"])
@@ -191,11 +192,7 @@ def edit_caption(message):
     args = message.text.split(maxsplit=2)
 
     if len(args) < 3:
-        bot.reply_to(
-            message,
-            "❌ ব্যবহার পদ্ধতি: `/editcaption <ID> <নতুন ক্যাপশন>`",
-            parse_mode="Markdown",
-        )
+        bot.reply_to(message, "❌ ব্যবহার পদ্ধতি: /editcaption <ID> <নতুন ক্যাপশন>")
         return
 
     cap_id, new_text = args[1], args[2]
@@ -209,7 +206,7 @@ def edit_caption(message):
         updated = cursor.rowcount
 
     if updated > 0:
-        bot.reply_to(message, f"✅ ID `{cap_id}` সফলভাবে আপডেট করা হয়েছে!")
+        bot.reply_to(message, f"✅ ID {cap_id} সফলভাবে আপডেট করা হয়েছে!")
     else:
         bot.reply_to(message, "❌ ক্যাপশন খুঁজে পাওয়া যায়নি বা এটি আপনার নয়।")
 
@@ -220,9 +217,7 @@ def delete_caption(message):
     args = message.text.split()
 
     if len(args) < 2:
-        bot.reply_to(
-            message, "❌ ব্যবহার পদ্ধতি: `/deletecaption <ID>`", parse_mode="Markdown"
-        )
+        bot.reply_to(message, "❌ ব্যবহার পদ্ধতি: /deletecaption <ID>")
         return
 
     cap_id = args[1]
@@ -235,7 +230,7 @@ def delete_caption(message):
         deleted = cursor.rowcount
 
     if deleted > 0:
-        bot.reply_to(message, f"🗑️ ID `{cap_id}` সফলভাবে ডিলিট করা হয়েছে!")
+        bot.reply_to(message, f"🗑️ ID {cap_id} সফলভাবে ডিলিট করা হয়েছে!")
     else:
         bot.reply_to(message, "❌ ক্যাপশন খুঁজে পাওয়া যায়নি।")
 
@@ -243,22 +238,18 @@ def delete_caption(message):
 @bot.message_handler(commands=["settarget"])
 def set_target(message):
     user_id = message.from_user.id
-    target = message.text.replace("/settarget", "").strip()
+    target = message.text.replace("/settarget", "", 1).strip()
 
     if not target:
         bot.reply_to(
-            message,
-            "❌ ব্যবহার পদ্ধতি: `/settarget @channelusername` অথবা ID",
-            parse_mode="Markdown",
+            message, "❌ ব্যবহার পদ্ধতি: /settarget @channelusername অথবা ID"
         )
         return
 
     update_user(user_id, target_chat=target)
     bot.reply_to(
         message,
-        f"🎯 টার্গেট সেট করা হয়েছে: `{target}`\n\n*(মনে রাখবেন, বটকে ওই"
-        " চ্যানেল/গ্রুপে Admin বানাতে হবে)*",
-        parse_mode="Markdown",
+        f"🎯 টার্গেট সেট করা হয়েছে: {target}\n\n*(মনে রাখবেন, বটকে ওই চ্যানেল/গ্রুপে Admin বানাতে হবে)*",
     )
 
 
@@ -270,15 +261,14 @@ def set_time(message):
     if len(args) < 2 or not args[1].isdigit():
         bot.reply_to(
             message,
-            "❌ ব্যবহার পদ্ধতি: `/settime <minutes>` (যেমন: `/settime 60`)",
-            parse_mode="Markdown",
+            "❌ ব্যবহার পদ্ধতি: /settime <minutes> (যেমন: /settime 60)",
         )
         return
 
     interval = int(args[1])
     update_user(user_id, interval_min=interval)
     bot.reply_to(
-        message, f"⏱️ টাইম ইন্টারভাল সেট করা হয়েছে: `{interval}` মিনিট পর পর।"
+        message, f"⏱️ টাইম ইন্টারভাল সেট করা হয়েছে: {interval} মিনিট পর পর।"
     )
 
 
@@ -289,9 +279,7 @@ def start_post(message):
 
     if not u["target_chat"]:
         bot.reply_to(
-            message,
-            "❌ আগে চ্যানেল সেট করুন। যেমন: `/settarget @yourchannel`",
-            parse_mode="Markdown",
+            message, "❌ আগে চ্যানেল সেট করুন। যেমন: /settarget @yourchannel"
         )
         return
 
@@ -326,10 +314,7 @@ def admin_stats(message):
 
     bot.reply_to(
         message,
-        f"📊 *Admin Analytics*\n\n"
-        f"👤 *Total Users:* `{total_users}`\n"
-        f"⚡ *Active Auto Posters:* `{active_users}`",
-        parse_mode="Markdown",
+        f"📊 Admin Analytics\n\nTotal Users: {total_users}\nActive Auto Posters: {active_users}",
     )
 
 
@@ -338,9 +323,9 @@ def admin_broadcast(message):
     if message.from_user.id != ADMIN_ID:
         return
 
-    broadcast_msg = message.text.replace("/broadcast", "").strip()
+    broadcast_msg = message.text.replace("/broadcast", "", 1).strip()
     if not broadcast_msg:
-        bot.reply_to(message, "❌ ব্যবহার: `/broadcast আপনার মেসেজ`")
+        bot.reply_to(message, "❌ ব্যবহার: /broadcast আপনার মেসেজ")
         return
 
     with db_lock:
@@ -355,7 +340,7 @@ def admin_broadcast(message):
         except Exception:
             pass
 
-    bot.reply_to(message, f"📢 মোট `{count}` জন ইউজারের কাছে মেসেজ পাঠানো হয়েছে!")
+    bot.reply_to(message, f"📢 মোট {count} জন ইউজারের কাছে মেসেজ পাঠানো হয়েছে!")
 
 
 # --- BACKGROUND AUTO POSTER ENGINE ---
@@ -406,7 +391,7 @@ def auto_poster_loop():
 
 threading.Thread(target=auto_poster_loop, daemon=True).start()
 
-# --- BOT STARTUP WITH CONFLICT 409 AUTO RECOVERY ---
+# --- BOT STARTUP ---
 try:
     bot.remove_webhook()
 except Exception as e:
@@ -427,4 +412,3 @@ while True:
     except Exception as e:
         print(f"Polling Exception: {e}")
         time.sleep(5)
-    
