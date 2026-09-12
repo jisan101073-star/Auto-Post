@@ -4,10 +4,8 @@ import socketserver
 import sqlite3
 import threading
 import time
-import asyncio
-from pyrogram import Client, filters
-from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-from pyrogram.errors import FloodWait, RPCError
+import telebot
+from telebot.apihelper import ApiTelegramException
 
 
 # --- RENDER PORT BINDING & UPTIMEROBOT FIX ---
@@ -17,7 +15,7 @@ class HealthCheckHandler(http.server.BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-type", "text/plain")
         self.end_headers()
-        self.wfile.write(b"Jisan Userbot is Alive!")
+        self.wfile.write(b"Jisan Bot is Alive!")
 
     def do_HEAD(self):
         self.send_response(200)
@@ -40,20 +38,14 @@ def run_web_server():
 threading.Thread(target=run_web_server, daemon=True).start()
 
 
-# --- PYROGRAM USERBOT & DATABASE SETUP ---
-API_ID = int(os.getenv("API_ID", "0"))
-API_HASH = os.getenv("API_HASH", "")
-SESSION_STRING = os.getenv("SESSION_STRING", "")
+# --- TELEGRAM BOT & DATABASE SETUP ---
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 
-if not API_ID or not API_HASH or not SESSION_STRING:
-    raise ValueError("Error: API_ID, API_HASH, or SESSION_STRING Environment Variables are missing!")
+if not BOT_TOKEN:
+    raise ValueError("Error: BOT_TOKEN Environment Variable is missing!")
 
-app = Client(
-    "jisan_userbot",
-    api_id=API_ID,
-    api_hash=API_HASH,
-    session_string=SESSION_STRING
-)
+bot = telebot.TeleBot(BOT_TOKEN)
 
 # SQLite Database Setup
 db_lock = threading.Lock()
@@ -68,20 +60,18 @@ CREATE TABLE IF NOT EXISTS users (
     target_chat TEXT,
     interval_min INTEGER DEFAULT 60,
     is_active INTEGER DEFAULT 0,
+    current_index INTEGER DEFAULT 0,
     last_post_time REAL DEFAULT 0
 )
 """
 )
 
-# Table to store full posts (Media + Caption/Text)
 cursor.execute(
     """
-CREATE TABLE IF NOT EXISTS posts (
+CREATE TABLE IF NOT EXISTS captions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id INTEGER,
-    from_chat_id INTEGER,
-    message_id INTEGER,
-    preview_text TEXT
+    caption_text TEXT
 )
 """
 )
@@ -96,7 +86,7 @@ CREATE TABLE IF NOT EXISTS channels (
 """
 )
 
-# Table for Tracking Sent Messages (To keep only 3 posts max)
+# Table for Tracking Sent Messages (To keep only 3 posts max, 4th deletes 1st)
 cursor.execute(
     """
 CREATE TABLE IF NOT EXISTS sent_messages (
@@ -127,7 +117,8 @@ def get_user(user_id):
             "target_chat": res[1],
             "interval_min": res[2],
             "is_active": res[3],
-            "last_post_time": res[4],
+            "current_index": res[4],
+            "last_post_time": res[5],
         }
 
 
@@ -140,124 +131,251 @@ def update_user(user_id, **kwargs):
         conn.commit()
 
 
-# --- COMMAND HANDLERS (CONTROLLED BY YOUR OWN ACCOUNT) ---
+# --- AUTOMATIC CHANNEL DETECTOR VIA FORWARDED MESSAGES ---
+@bot.message_handler(
+    func=lambda msg: msg.forward_from_chat is not None
+    and msg.forward_from_chat.type in ["channel", "supergroup", "group"]
+)
+def handle_channel_forward(message):
+    user_id = message.from_user.id
+    channel = message.forward_from_chat
+    chat_id = str(channel.id)
+    title = channel.title or "Chat"
+
+    try:
+        bot_user = bot.get_me()
+        member = bot.get_chat_member(chat_id, bot_user.id)
+
+        if member.status in ["administrator", "creator"]:
+            with db_lock:
+                cursor.execute(
+                    "INSERT OR REPLACE INTO channels (chat_id, title, added_by)"
+                    " VALUES (?, ?, ?)",
+                    (chat_id, title, user_id),
+                )
+                conn.commit()
+
+            update_user(user_id, target_chat=chat_id)
+            bot.reply_to(
+                message,
+                f"✅ চ্যানেল বা গ্রুপ সফলভাবে সনাক্ত এবং সেট করা হয়েছে!\n\n📌 Target"
+                f" Chat: {title}\n🆔 ID: {chat_id}\n\nএখন থেকে আপনার অটো পোস্ট"
+                " এখানে যাবে。",
+            )
+        else:
+            bot.reply_to(
+                message,
+                f"⚠️ গ্রুপ/চ্যানেল পাওয়া গেছে ({title}), কিন্তু বটকে সেখানে Admin"
+                " বানানো হয়নি!\n\nঅনুগ্রহ করে বটকে Admin বানিয়ে আবার মেসেজ"
+                " ফরওয়ার্ড করুন।",
+            )
+    except Exception as e:
+        bot.reply_to(
+            message,
+            "❌ ভেরিফাই করা যায়নি। বটকে ওই গ্রুপ বা চ্যানেলে Admin বানিয়ে আবার চেষ্টা করুন।",
+        )
 
 
-@app.on_message(filters.command(["start", "help"]) & filters.me)
-async def send_welcome(client, message):
+@bot.my_chat_member_handler()
+def handle_chat_member_update(event):
+    chat_id = str(event.chat.id)
+    title = event.chat.title or "Unknown Chat"
+    user_id = event.from_user.id
+    new_status = event.new_chat_member.status
+
+    with db_lock:
+        if new_status in ["administrator", "member"]:
+            cursor.execute(
+                "INSERT OR REPLACE INTO channels (chat_id, title, added_by)"
+                " VALUES (?, ?, ?)",
+                (chat_id, title, user_id),
+            )
+        elif new_status in ["left", "kicked"]:
+            cursor.execute(
+                "DELETE FROM channels WHERE chat_id = ?", (chat_id,)
+            )
+        conn.commit()
+
+
+# --- COMMAND HANDLERS ---
+
+
+@bot.message_handler(commands=["start", "help"])
+def send_welcome(message):
     user_id = message.from_user.id
     get_user(user_id)
 
     text = (
-        "🏴‍☠️ Welcome to Jisan Userbot! 🩸\n\n"
-        "👑 Session String এর মাধ্যমে আপনার নিজের আইডি থেকে মিডিয়া ও টেক্সটসহ অটো-পোস্ট সিস্টেম।\n\n"
+        "🏴‍☠️ Welcome to Jisan Bot! 🩸\n\n"
+        "👑 The official Auto Post automation bot by Jisan Brand.\n\n"
         "⚡ Available Commands:\n"
-        "• /addpost (ছবি, ভিডিও বা লেখার সাথে রিপ্লাই বা লিখে পাঠান) – কিউতে পোস্ট যোগ করুন\n"
-        "• /myposts – সেভ করা পোস্টগুলো দেখুন ও ম্যানেজ করুন\n"
-        "• /settarget – গ্রুপ বা চ্যানেল সেট করুন\n"
+        "• /addcaption <text> – নতুন ক্যাপশন যোগ করুন\n"
+        "• /mycaptions – ক্যাপশন ম্যানেজ বা ডিলিট/এডিট করুন\n"
+        "• /settarget – চ্যানেল বা গ্রুপ সিলেক্ট বা সেট করুন\n"
         "• /settime <minutes> – টাইম সেট করুন (মিনিটে)\n"
         "• /startpost – অটো পোস্ট চালু করুন\n"
-        "• /stoppost – অটো পোস্ট বন্ধ করুন"
+        "• /stoppost – অটো পোস্ট বন্ধ করুন\n\n"
+        "💡 টিপস: আপনার চ্যানেল বা গ্রুপ থেকে যেকোনো ১টি মেসেজ এই বটের ইনবক্সে ফরওয়ার্ড করলেও অটো সেভ হয়ে যাবে!"
     )
-    await message.reply_text(text)
+
+    if user_id == ADMIN_ID:
+        text += (
+            "\n\n• /stats – বট স্ট্যাটাস দেখুন (Admin)\n• /broadcast <msg> –"
+            " সবাইকে মেসেজ পাঠান (Admin)"
+        )
+
+    bot.reply_to(message, text)
 
 
-@app.on_message(filters.command(["addpost"]) & filters.me)
-async def add_post(client, message):
+@bot.message_handler(commands=["addcaption"])
+def add_caption(message):
     user_id = message.from_user.id
-    target_msg = message.reply_to_message or message
+    caption_text = message.text.replace("/addcaption", "", 1).strip()
 
-    preview = "Media Post"
-    if target_msg.text:
-        preview = target_msg.text[:30] + "..."
-    elif target_msg.caption:
-        preview = target_msg.caption[:30] + "..."
-    elif target_msg.photo:
-        preview = "📷 Photo Post"
-    elif target_msg.video:
-        preview = "📹 Video Post"
-    elif target_msg.document:
-        preview = "📁 Document Post"
+    if not caption_text:
+        bot.reply_to(message, "❌ ব্যবহার পদ্ধতি: /addcaption আপনার ক্যাপশন লিখুন")
+        return
 
     with db_lock:
         cursor.execute(
-            "INSERT INTO posts (user_id, from_chat_id, message_id, preview_text) VALUES (?, ?, ?, ?)",
-            (user_id, target_msg.chat.id, target_msg.id, preview),
+            "INSERT INTO captions (user_id, caption_text) VALUES (?, ?)",
+            (user_id, caption_text),
         )
         conn.commit()
 
-    await message.reply_text("✅ পোস্টটি সফলভাবে কিউতে সেভ করা হয়েছে!\nলিস্ট দেখতে /myposts লিখুন।")
+    bot.reply_to(
+        message, "✅ ক্যাপশন সফলভাবে সেভ হয়েছে!\nদেখতে /mycaptions লিখুন।"
+    )
 
 
-# --- POST MANAGER ---
-async def show_post_manager(client, chat_id, user_id, message_id=None):
+# --- INTERACTIVE CAPTION MANAGER ---
+def show_caption_manager(chat_id, user_id, message_id=None):
     with db_lock:
         cursor.execute(
-            "SELECT id, preview_text FROM posts WHERE user_id = ?", (user_id,)
+            "SELECT id, caption_text FROM captions WHERE user_id = ?", (user_id,)
         )
         rows = cursor.fetchall()
 
     if not rows:
-        text = "⚠️ আপনার কোনো সেভ করা পোস্ট নেই!\nপোস্ট যোগ করতে কোনো মেসেজ বা ছবি/ভিডিওর সাথে /addpost লিখে পাঠান।"
+        text = (
+            "⚠️ আপনার কোনো সেভ করা ক্যাপশন নেই!\nনতুন ক্যাপশন যোগ করতে"
+            " /addcaption ব্যবহার করুন।"
+        )
         if message_id:
             try:
-                await client.edit_message_text(chat_id, message_id, text)
+                bot.edit_message_text(
+                    text, chat_id=chat_id, message_id=message_id
+                )
             except Exception:
-                await client.send_message(chat_id, text)
+                bot.send_message(chat_id, text)
         else:
-            await client.send_message(chat_id, text)
+            bot.send_message(chat_id, text)
         return
 
-    msg = "📋 আপনার সেভ করা সম্পূর্ণ পোস্টসমূহ:\n\n"
-    markup_buttons = []
+    msg = "📋 আপনার সেভ করা সম্পূর্ণ ক্যাপশনসমূহ:\n\n"
+    markup = telebot.types.InlineKeyboardMarkup()
 
     for idx, row in enumerate(rows, start=1):
-        post_id = row[0]
+        cap_id = row[0]
         msg += f"--- [ Serial: {idx} ] ---\n{row[1]}\n\n"
-        markup_buttons.append([
-            InlineKeyboardButton(f"🗑️ ডিলিট #{idx}", callback_data=f"del_post:{post_id}:{idx}")
-        ])
 
-    msg += "------------------------------------\n👇 নিচের বাটনে চাপ দিয়ে ডিলিট করতে পারেন:"
-    markup = InlineKeyboardMarkup(markup_buttons)
+        btn_edit = telebot.types.InlineKeyboardButton(
+            f"✏️ এডিট #{idx}", callback_data=f"edit_cap:{cap_id}:{idx}"
+        )
+        btn_del = telebot.types.InlineKeyboardButton(
+            f"🗑️ ডিলিট #{idx}", callback_data=f"del_cap:{cap_id}:{idx}"
+        )
+        markup.row(btn_edit, btn_del)
+
+    msg += (
+        "------------------------------------\n👇 নিচের বাটনে চাপ দিয়ে এডিট বা"
+        " ডিলিট করুন:"
+    )
 
     if message_id:
         try:
-            await client.edit_message_text(chat_id, message_id, msg, reply_markup=markup)
+            bot.edit_message_text(
+                msg, chat_id=chat_id, message_id=message_id, reply_markup=markup
+            )
         except Exception:
-            await client.send_message(chat_id, msg, reply_markup=markup)
+            bot.send_message(chat_id, msg, reply_markup=markup)
     else:
-        await client.send_message(chat_id, msg, reply_markup=markup)
+        bot.send_message(chat_id, msg, reply_markup=markup)
 
 
-@app.on_message(filters.command(["myposts", "posts"]) & filters.me)
-async def handle_post_manager(client, message):
-    await show_post_manager(client, message.chat.id, message.from_user.id)
+@bot.message_handler(commands=["mycaptions", "editcaption", "deletecaption"])
+def handle_caption_manager(message):
+    show_caption_manager(message.chat.id, message.from_user.id)
 
 
-@app.on_callback_query(filters.regex(r"^del_post:"))
-async def callback_delete_post(client, callback_query):
-    parts = callback_query.data.split(":")
-    post_id = parts[1]
+@bot.callback_query_handler(
+    func=lambda call: call.data.startswith("del_cap:")
+)
+def callback_delete_caption(call):
+    parts = call.data.split(":")
+    cap_id = parts[1]
     idx = parts[2]
-    user_id = callback_query.from_user.id
+    user_id = call.from_user.id
 
     with db_lock:
         cursor.execute(
-            "DELETE FROM posts WHERE id = ? AND user_id = ?",
-            (post_id, user_id),
+            "DELETE FROM captions WHERE id = ? AND user_id = ?",
+            (cap_id, user_id),
         )
         conn.commit()
 
-    await callback_query.answer(f"✅ সিরিয়াল #{idx} ডিলিট করা হয়েছে!")
-    await show_post_manager(
-        client, callback_query.message.chat.id, user_id, message_id=callback_query.message.id
+    bot.answer_callback_query(call.id, f"✅ সিরিয়াল #{idx} ডিলিট করা হয়েছে!")
+    show_caption_manager(
+        call.message.chat.id, user_id, message_id=call.message.message_id
     )
 
 
+@bot.callback_query_handler(
+    func=lambda call: call.data.startswith("edit_cap:")
+)
+def callback_edit_caption(call):
+    parts = call.data.split(":")
+    cap_id = parts[1]
+    idx = parts[2]
+    user_id = call.from_user.id
+
+    bot.answer_callback_query(call.id, f"সিরিয়াল #{idx} এডিট হচ্ছে...")
+    msg = bot.send_message(
+        call.message.chat.id,
+        f"✏️ সিরিয়াল #{idx} এর জন্য নতুন ক্যাপশনটি লিখে বা পেস্ট করে"
+        " পাঠান:\n\n(বা বাতিল করতে /cancel লিখুন)",
+    )
+    bot.register_next_step_handler(
+        msg, process_new_caption_step, cap_id, user_id
+    )
+
+
+def process_new_caption_step(message, cap_id, user_id):
+    if message.text and message.text.strip().lower() == "/cancel":
+        bot.reply_to(message, "❌ এডিট বাতিল করা হয়েছে।")
+        return
+
+    new_text = message.text or message.caption
+    if not new_text:
+        bot.reply_to(
+            message, "❌ ক্যাপশন খালি রাখা যাবে না। আবার চেষ্টা করুন।"
+        )
+        return
+
+    with db_lock:
+        cursor.execute(
+            "UPDATE captions SET caption_text = ? WHERE id = ? AND user_id = ?",
+            (new_text, cap_id, user_id),
+        )
+        conn.commit()
+
+    bot.reply_to(message, "✅ ক্যাপশন সফলভাবে আপডেট করা হয়েছে!")
+    show_caption_manager(message.chat.id, user_id)
+
+
 # --- TARGET SETTER & CHANNEL SELECTOR ---
-@app.on_message(filters.command(["settarget", "channels"]) & filters.me)
-async def set_target(client, message):
+@bot.message_handler(commands=["settarget", "channels"])
+def set_target(message):
     user_id = message.from_user.id
     args = (
         message.text.replace("/settarget", "")
@@ -268,96 +386,199 @@ async def set_target(client, message):
     if args:
         target = args
         try:
-            chat_info = await client.get_chat(target)
+            chat_info = bot.get_chat(target)
             chat_id = str(chat_info.id)
             title = chat_info.title or target
-            update_user(user_id, target_chat=chat_id)
-            await message.reply_text(
-                f"✅ গ্রুপ/চ্যানেল সফলভাবে সেট হয়েছে!\n\n📌 Target: {title}\n🆔 ID: {chat_id}"
-            )
+            bot_user = bot.get_me()
+            member = bot.get_chat_member(chat_id, bot_user.id)
+
+            if member.status in ["administrator", "creator"]:
+                with db_lock:
+                    cursor.execute(
+                        "INSERT OR REPLACE INTO channels (chat_id, title,"
+                        " added_by) VALUES (?, ?, ?)",
+                        (chat_id, title, user_id),
+                    )
+                    conn.commit()
+                update_user(user_id, target_chat=chat_id)
+                bot.reply_to(
+                    message,
+                    f"✅ গ্রুপ/চ্যানেল সফলভাবে সেট হয়েছে!\n\n📌 Target Chat:"
+                    f" {title}\n🆔 ID: {chat_id}",
+                )
+            else:
+                bot.reply_to(
+                    message,
+                    f"⚠️ বটকে {target} গ্রুপ বা চ্যানেলে Admin করা হয়নি! আগে Admin বানিয়ে"
+                    " আবার চেষ্টা করুন।",
+                )
         except Exception:
             update_user(user_id, target_chat=target)
-            await message.reply_text(f"🎯 টার্গেট সেট করা হয়েছে: {target}")
+            bot.reply_to(
+                message,
+                f"🎯 টার্গেট সেট করা হয়েছে: {target}\n(মনে রাখবেন, বটকে ওই"
+                " গ্রুপ/চ্যানেলে Admin থাকতে হবে)",
+            )
         return
 
     with db_lock:
         cursor.execute("SELECT chat_id, title FROM channels")
         rows = cursor.fetchall()
 
-    markup_buttons = []
+    markup = telebot.types.InlineKeyboardMarkup()
     if rows:
         for chat_id, title in rows:
-            markup_buttons.append([
-                InlineKeyboardButton(text=f"📢 {title}", callback_data=f"select_chat:{chat_id}:{title[:15]}")
-            ])
+            markup.add(
+                telebot.types.InlineKeyboardButton(
+                    text=f"📢 {title}",
+                    callback_data=f"select_chat:{chat_id}:{title[:15]}",
+                )
+            )
 
-    msg_text = "🎯 গ্রুপ বা চ্যানেল সেট করার নিয়ম:\n\nইউজারনেম বা আইডি দিয়ে: /settarget @GroupOrChannelUsername লিখুন।"
-    markup = InlineKeyboardMarkup(markup_buttons) if markup_buttons else None
-    await message.reply_text(msg_text, reply_markup=markup)
+    msg_text = (
+        "🎯 গ্রুপ বা চ্যানেল সেট করার সহজ উপায়সমূহ:\n\n"
+        "১. মেসেজ ফরওয়ার্ড (সেরা): আপনার গ্রুপ বা চ্যানেল থেকে যেকোনো ১টি পোস্ট এই বটের ইনবক্সে Forward করুন।\n"
+        "২. ইউজারনেম/আইডি দিয়ে: /settarget @YourUsername বা আইডি লিখুন।\n"
+    )
+
+    if rows:
+        msg_text += "৩. অথবা নিচের বাটন থেকে সিলেক্ট করুন:"
+        bot.reply_to(message, msg_text, reply_markup=markup)
+    else:
+        msg_text += "\n👉 আপনার গ্রুপ বা চ্যানেল থেকে ১টি পোস্ট ফরওয়ার্ড করে দিন, সাথে সাথে সেট হয়ে যাবে!"
+        bot.reply_to(message, msg_text)
 
 
-@app.on_callback_query(filters.regex(r"^select_chat:"))
-async def callback_select_chat(client, callback_query):
-    data_parts = callback_query.data.split(":", 2)
+@bot.callback_query_handler(
+    func=lambda call: call.data.startswith("select_chat:")
+)
+def callback_select_chat(call):
+    data_parts = call.data.split(":", 2)
     chat_id = data_parts[1]
     title = data_parts[2]
-    user_id = callback_query.from_user.id
+    user_id = call.from_user.id
 
     update_user(user_id, target_chat=chat_id)
 
-    await callback_query.answer(f"সিলেক্ট করা হয়েছে: {title}")
-    await callback_query.message.edit_text(
-        f"✅ গ্রুপ/চ্যানেল সফলভাবে সেট হয়েছে!\n\n📌 Target: {title}\n🆔 ID: {chat_id}\n\nএখন থেকে আপনার আইডি থেকে অটো পোস্ট এখানে যাবে।"
+    bot.answer_callback_query(call.id, f"সিলেক্ট করা হয়েছে: {title}")
+    bot.edit_message_text(
+        chat_id=call.message.chat.id,
+        message_id=call.message.message_id,
+        text=(
+            f"✅ গ্রুপ/চ্যানেল সফলভাবে সেট হয়েছে!\n\n"
+            f"📌 Target Chat: {title}\n"
+            f"🆔 ID: {chat_id}\n\n"
+            f"এখন থেকে আপনার অটো পোস্ট এই গ্রুপ বা চ্যানেলে যাবে।"
+        ),
     )
 
 
-@app.on_message(filters.command(["settime"]) & filters.me)
-async def set_time(client, message):
+@bot.message_handler(commands=["settime"])
+def set_time(message):
     user_id = message.from_user.id
     args = message.text.split()
 
     if len(args) < 2 or not args[1].isdigit():
-        await message.reply_text("❌ ব্যবহার পদ্ধতি: /settime <minutes> (যেমন: /settime 60)")
+        bot.reply_to(
+            message,
+            "❌ ব্যবহার পদ্ধতি: /settime <minutes> (যেমন: /settime 60)",
+        )
         return
 
     interval = int(args[1])
     update_user(user_id, interval_min=interval)
-    await message.reply_text(f"⏱️ টাইম ইন্টারভাল সেট করা হয়েছে: {interval} মিনিট পর পর।")
+    bot.reply_to(
+        message, f"⏱️ টাইম ইন্টারভাল সেট করা হয়েছে: {interval} মিনিট পর পর।"
+    )
 
 
-@app.on_message(filters.command(["startpost"]) & filters.me)
-async def start_post(client, message):
+@bot.message_handler(commands=["startpost"])
+def start_post(message):
     user_id = message.from_user.id
     u = get_user(user_id)
 
     if not u["target_chat"]:
-        await message.reply_text("❌ আপনি এখনও কোনো গ্রুপ বা চ্যানেল সেট করেননি!\n/settarget ব্যবহার করুন।")
+        bot.reply_to(
+            message,
+            "❌ আপনি এখনও কোনো গ্রুপ বা চ্যানেল সিলেক্ট করেননি!\n"
+            "আপনার গ্রুপ/চ্যানেল থেকে ১টি পোস্ট এখানে ফরওয়ার্ড করুন অথবা /settarget লিখুন।",
+        )
         return
 
     update_user(user_id, is_active=1, last_post_time=0)
-    await message.reply_text("🚀 আপনার আইডি থেকে অটো পোস্ট চালু করা হয়েছে! অফলাইনেও সময় অনুযায়ী পোস্ট হবে।")
+    bot.reply_to(
+        message,
+        "🚀 অটো পোস্ট চালু করা হয়েছে! সময় অনুযায়ী পোস্ট হওয়া শুরু হবে।",
+    )
 
 
-@app.on_message(filters.command(["stoppost"]) & filters.me)
-async def stop_post(client, message):
+@bot.message_handler(commands=["stoppost"])
+def stop_post(message):
     user_id = message.from_user.id
     update_user(user_id, is_active=0)
-    await message.reply_text("🛑 অটো পোস্ট বন্ধ করা হয়েছে।")
+    bot.reply_to(message, "🛑 অটো পোস্ট বন্ধ করা হয়েছে।")
 
 
-# --- BACKGROUND AUTO POSTER ENGINE (POSTING FROM YOUR ID WITH 3-MESSAGE LIMIT) ---
+# --- ADMIN ONLY COMMANDS ---
 
 
-async def auto_poster_loop():
-    await asyncio.sleep(5)
+@bot.message_handler(commands=["stats"])
+def admin_stats(message):
+    if message.from_user.id != ADMIN_ID:
+        return
+
+    with db_lock:
+        cursor.execute("SELECT COUNT(*) FROM users")
+        total_users = cursor.fetchone()[0]
+
+        cursor.execute("SELECT COUNT(*) FROM users WHERE is_active = 1")
+        active_users = cursor.fetchone()[0]
+
+    bot.reply_to(
+        message,
+        f"📊 Admin Analytics\n\nTotal Users: {total_users}\nActive Auto Posters:"
+        f" {active_users}",
+    )
+
+
+@bot.message_handler(commands=["broadcast"])
+def admin_broadcast(message):
+    if message.from_user.id != ADMIN_ID:
+        return
+
+    broadcast_msg = message.text.replace("/broadcast", "", 1).strip()
+    if not broadcast_msg:
+        bot.reply_to(message, "❌ ব্যবহার: /broadcast আপনার মেসেজ")
+        return
+
+    with db_lock:
+        cursor.execute("SELECT user_id FROM users")
+        users = cursor.fetchall()
+
+    count = 0
+    for u in users:
+        try:
+            bot.send_message(u[0], broadcast_msg)
+            count += 1
+        except Exception:
+            pass
+
+    bot.reply_to(message, f"📢 মোট {count} জন ইউজারের কাছে মেসেজ পাঠানো হয়েছে!")
+
+
+# --- BACKGROUND AUTO POSTER ENGINE (WITH GROUP SUPPORT & 3-MESSAGE LIMIT) ---
+
+
+def auto_poster_loop():
     while True:
         try:
-            await asyncio.sleep(15)
+            time.sleep(15)
             current_time = time.time()
 
             with db_lock:
                 cursor.execute(
-                    "SELECT user_id, target_chat, interval_min, last_post_time FROM users WHERE is_active = 1"
+                    "SELECT user_id, target_chat, interval_min, last_post_time"
+                    " FROM users WHERE is_active = 1"
                 )
                 active_posters = cursor.fetchall()
 
@@ -367,31 +588,29 @@ async def auto_poster_loop():
                 if current_time - last_time >= (interval * 60):
                     with db_lock:
                         cursor.execute(
-                            "SELECT id, from_chat_id, message_id FROM posts WHERE user_id = ? ORDER BY id ASC LIMIT 1",
+                            "SELECT id, caption_text FROM captions WHERE"
+                            " user_id = ? ORDER BY id ASC LIMIT 1",
                             (u_id,),
                         )
-                        post_row = cursor.fetchone()
+                        cap = cursor.fetchone()
 
-                    if post_row:
-                        post_id, from_chat_id, source_msg_id = post_row
+                    if cap:
+                        cap_id, post_text = cap
 
                         try:
+                            # Target chat format fix for Groups/Channels (integer conversion if it's numeric ID)
                             chat_target = target
-                            if str(target).lstrip('-').isdigit():
+                            if str(target).lstrip("-").isdigit():
                                 chat_target = int(target)
 
-                            # 1. Copy post directly from YOUR account using Session String
-                            sent_msg = await client.copy_message(
-                                chat_id=chat_target,
-                                from_chat_id=from_chat_id,
-                                message_id=source_msg_id
-                            )
+                            # 1. Post/Send message to group or channel
+                            sent_msg = bot.send_message(chat_target, post_text)
 
-                            # 2. Keep only 3 messages rule (4th message deletes 1st)
+                            # 2. 3-Message Limit Rule: Save sent message and delete oldest if count exceeds 3
                             with db_lock:
                                 cursor.execute(
                                     "INSERT INTO sent_messages (user_id, chat_id, message_id) VALUES (?, ?, ?)",
-                                    (u_id, str(target), sent_msg.id),
+                                    (u_id, str(target), sent_msg.message_id),
                                 )
                                 conn.commit()
 
@@ -401,11 +620,12 @@ async def auto_poster_loop():
                                 )
                                 history = cursor.fetchall()
 
+                            # If more than 3 messages exist, delete the oldest ones until only 3 remain
                             if len(history) > 3:
-                                for old_msg in history[:-3]:
-                                    db_id, old_msg_id = old_msg
+                                for old_item in history[:-3]:
+                                    db_id, old_msg_id = old_item
                                     try:
-                                        await client.delete_messages(chat_target, old_msg_id)
+                                        bot.delete_message(chat_target, old_msg_id)
                                     except Exception:
                                         pass
                                     with db_lock:
@@ -415,56 +635,7 @@ async def auto_poster_loop():
                                         )
                                         conn.commit()
 
-                            # 3. Delete posted item from queue so it won't repeat
+                            # 3. Auto delete caption from Database after successfully posting
                             with db_lock:
                                 cursor.execute(
-                                    "DELETE FROM posts WHERE id = ?",
-                                    (post_id,),
-                                )
-                                conn.commit()
-
-                            update_user(u_id, last_post_time=current_time)
-
-                        except FloodWait as e:
-                            print(f"⚠️ FloodWait: Sleeping for {e.value} seconds...")
-                            await asyncio.sleep(e.value)
-                        except RPCError as e:
-                            print(f"RPC Error for user {u_id}: {e}")
-                            if "CHAT_WRITE_FORBIDDEN" in str(e) or "USER_NOT_PARTICIPANT" in str(e) or "PEER_ID_INVALID" in str(e):
-                                update_user(u_id, is_active=0)
-                                try:
-                                    await client.send_message(
-                                        u_id,
-                                        f"⚠️ গ্রুপ/চ্যানেল ({target}) এ মেসেজ পাঠাতে বাধা দেওয়া হয়েছে ({e})!\n\nওই গ্রুপের জন্য অটো-পোস্ট বন্ধ করা হলো।"
-                                    )
-                                except Exception:
-                                    pass
-                            else:
-                                update_user(u_id, last_post_time=current_time)
-                        except Exception as e:
-                            print(f"Post failed for user {u_id}: {e}")
-                            update_user(u_id, last_post_time=current_time)
-                    else:
-                        update_user(u_id, is_active=0)
-                        try:
-                            await client.send_message(
-                                u_id,
-                                "⚠️ আপনার সেভ করা সকল পোস্ট পাঠানো শেষ হয়ে গেছে! অটো-পোস্ট বন্ধ করা হলো।"
-                            )
-                        except Exception:
-                            pass
-
-        except Exception as err:
-            print(f"Loop error: {err}")
-
-
-# --- STARTUP RUNNER ---
-async def main():
-    async with app:
-        print("Jisan Userbot is Starting with Session String & Post Queue...")
-        asyncio.create_task(auto_poster_loop())
-        await asyncio.Future()
-
-if __name__ == "__main__":
-    asyncio.run(main())
-        
+                                    "DE
