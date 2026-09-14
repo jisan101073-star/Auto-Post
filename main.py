@@ -1346,7 +1346,7 @@ def admin_broadcast(message):
 # - A caption is deleted ONLY after successful Telegram posting.
 # - Failed posts keep the caption safe in Firebase.
 # - The bot posts the oldest saved caption first.
-# - The existing 3-message deletion rule remains.
+# - Already-posted channel messages are NEVER deleted by this bot.
 # =========================================================
 
 def auto_poster_loop():
@@ -1407,38 +1407,13 @@ def auto_poster_loop():
                         post_text
                     )
 
-                    # 2. Record sent message first.
-                    sent_id = add_sent_message(
+                    # 2. Record the sent message for history/statistics only.
+                    # IMPORTANT: the bot NEVER deletes this message from the channel.
+                    add_sent_message(
                         u_id,
                         str(target),
                         sent_msg.message_id
                     )
-
-                    # 3. Keep only the newest 3 posts.
-                    history = get_sent_messages(
-                        u_id,
-                        str(target)
-                    )
-
-                    if len(history) > 3:
-                        old_items = history[:-3]
-
-                        for old_item in old_items:
-                            old_msg_id = int(
-                                old_item["message_id"]
-                            )
-
-                            try:
-                                bot.delete_message(
-                                    chat_target,
-                                    old_msg_id
-                                )
-                            except Exception:
-                                pass
-
-                            delete_sent_record(
-                                old_item["id"]
-                            )
 
                     # 4. IMPORTANT:
                     # Delete caption ONLY AFTER successful post.
