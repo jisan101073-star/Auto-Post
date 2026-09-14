@@ -189,15 +189,19 @@ def load_state():
 
 
 def save_state():
+    # IMPORTANT: keep the lock for the entire Firebase write.
+    # Firebase writes the whole bot state in one operation, so allowing two
+    # threads to take snapshots and write them out-of-order can overwrite
+    # newer captions/users with an older snapshot. That was causing queued
+    # captions to randomly disappear and auto-posts to skip.
     with state_lock:
         payload = copy.deepcopy(APP_STATE)
-
-    try:
-        firebase_ref.set(payload)
-        return True
-    except Exception:
-        logger.exception("Firebase save failed.")
-        return False
+        try:
+            firebase_ref.set(payload)
+            return True
+        except Exception:
+            logger.exception("Firebase save failed.")
+            return False
 
 
 APP_STATE = deep_default_state()
